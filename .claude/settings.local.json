@@ -4,7 +4,8 @@
       "WebSearch",
       "Bash(npm run:*)",
       "Bash(git add:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(curl:*)"
     ]
   }
 }

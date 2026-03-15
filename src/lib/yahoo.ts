@@ -1,4 +1,3 @@
-import yahooFinance from "yahoo-finance2";
 import type {
   StockQuote,
   KeyRatios,
@@ -10,11 +9,22 @@ import type {
   SearchResult,
 } from "./types";
 
+const BASE = "https://query1.finance.yahoo.com";
+const HEADERS = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" };
+
+async function yfetch<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, { headers: HEADERS });
+  if (!res.ok) throw new Error(`Yahoo Finance API error: ${res.status}`);
+  return res.json();
+}
+
 export async function searchTickers(query: string): Promise<SearchResult[]> {
   if (!query || query.length < 1) return [];
   try {
-    const results = await yahooFinance.search(query, { newsCount: 0 }) as any;
-    return (results.quotes || [])
+    const data = await yfetch<any>(
+      `/v1/finance/search?q=${encodeURIComponent(query)}&quotesCount=8&newsCount=0`
+    );
+    return (data.quotes || [])
       .filter((q: any) => q.symbol && q.quoteType === "EQUITY")
       .map((q: any) => ({
         symbol: q.symbol,
@@ -33,34 +43,51 @@ export async function searchTickers(query: string): Promise<SearchResult[]> {
 
 export async function getQuote(symbol: string): Promise<StockQuote | null> {
   try {
-    const result = (await yahooFinance.quote(symbol)) as any;
-    if (!result || !result.symbol) return null;
+    const data = await yfetch<any>(`/v8/finance/chart/${symbol}?interval=1d&range=1d`);
+    const result = data.chart?.result?.[0];
+    if (!result) return null;
+
+    const meta = result.meta;
+    if (!meta || !meta.symbol) return null;
+
+    // Get additional data from quoteSummary
+    const summary = await yfetch<any>(
+      `/v10/finance/quoteSummary/${symbol}?modules=price,defaultKeyStatistics,summaryDetail,assetProfile`
+    ).catch(() => null);
+
+    const price = summary?.quoteSummary?.result?.[0]?.price || {};
+    const detail = summary?.quoteSummary?.result?.[0]?.summaryDetail || {};
+    const stats = summary?.quoteSummary?.result?.[0]?.defaultKeyStatistics || {};
+    const profile = summary?.quoteSummary?.result?.[0]?.assetProfile || {};
+
     return {
-      symbol: result.symbol,
-      shortName: result.shortName || "",
-      longName: result.longName || result.shortName || "",
-      currency: result.currency || "USD",
-      regularMarketPrice: result.regularMarketPrice || 0,
-      regularMarketChange: result.regularMarketChange || 0,
-      regularMarketChangePercent: result.regularMarketChangePercent || 0,
-      regularMarketPreviousClose: result.regularMarketPreviousClose || 0,
-      regularMarketOpen: result.regularMarketOpen || 0,
-      regularMarketDayHigh: result.regularMarketDayHigh || 0,
-      regularMarketDayLow: result.regularMarketDayLow || 0,
-      regularMarketVolume: result.regularMarketVolume || 0,
-      marketCap: result.marketCap || 0,
-      fiftyTwoWeekLow: result.fiftyTwoWeekLow || 0,
-      fiftyTwoWeekHigh: result.fiftyTwoWeekHigh || 0,
-      fiftyDayAverage: result.fiftyDayAverage || 0,
-      twoHundredDayAverage: result.twoHundredDayAverage || 0,
-      sharesOutstanding: result.sharesOutstanding || 0,
-      trailingPE: result.trailingPE ?? null,
-      forwardPE: result.forwardPE ?? null,
-      priceToBook: result.priceToBook ?? null,
-      dividendYield: result.dividendYield ?? null,
-      beta: result.beta ?? null,
-      sector: (result as any).sector || "",
-      industry: (result as any).industry || "",
+      symbol: meta.symbol,
+      shortName: price.shortName || meta.shortName || meta.symbol,
+      longName: price.longName || meta.longName || meta.shortName || meta.symbol,
+      currency: meta.currency || "USD",
+      regularMarketPrice: meta.regularMarketPrice || 0,
+      regularMarketChange: meta.regularMarketPrice - (meta.previousClose || meta.chartPreviousClose || 0),
+      regularMarketChangePercent: meta.previousClose
+        ? ((meta.regularMarketPrice - meta.previousClose) / meta.previousClose) * 100
+        : 0,
+      regularMarketPreviousClose: meta.previousClose || meta.chartPreviousClose || 0,
+      regularMarketOpen: detail.regularMarketOpen || meta.regularMarketPrice || 0,
+      regularMarketDayHigh: detail.regularMarketDayHigh || 0,
+      regularMarketDayLow: detail.regularMarketDayLow || 0,
+      regularMarketVolume: detail.regularMarketVolume || 0,
+      marketCap: detail.marketCap?.raw || meta.marketCap || 0,
+      fiftyTwoWeekLow: detail.fiftyTwoWeekLow || 0,
+      fiftyTwoWeekHigh: detail.fiftyTwoWeekHigh || 0,
+      fiftyDayAverage: detail.fiftyDayAverage || 0,
+      twoHundredDayAverage: detail.twoHundredDayAverage || 0,
+      sharesOutstanding: stats.sharesOutstanding?.raw || meta.sharesOutstanding || 0,
+      trailingPE: detail.trailingPE?.raw ?? detail.trailingPE ?? null,
+      forwardPE: detail.forwardPE?.raw ?? detail.forwardPE ?? null,
+      priceToBook: detail.priceToBook?.raw ?? detail.priceToBook ?? null,
+      dividendYield: detail.dividendYield?.raw ?? detail.dividendYield ?? null,
+      beta: stats.beta?.raw ?? stats.beta ?? null,
+      sector: profile.sector || "",
+      industry: profile.industry || "",
     };
   } catch {
     return null;
@@ -69,82 +96,71 @@ export async function getQuote(symbol: string): Promise<StockQuote | null> {
 
 export async function getKeyRatios(symbol: string): Promise<KeyRatios | null> {
   try {
-    const [quote, modules] = await Promise.all([
-      yahooFinance.quote(symbol) as Promise<any>,
-      yahooFinance.quoteSummary(symbol, {
-        modules: [
-          "financialData",
-          "defaultKeyStatistics",
-          "summaryDetail",
-        ],
-      }) as Promise<any>,
-    ]);
+    const data = await yfetch<any>(
+      `/v10/finance/quoteSummary/${symbol}?modules=financialData,defaultKeyStatistics,summaryDetail`
+    );
+    const result = data.quoteSummary?.result?.[0];
+    if (!result) return null;
 
-    const fin = modules.financialData || {};
-    const stats = modules.defaultKeyStatistics || {};
-    const detail = modules.summaryDetail || {};
+    const fin = result.financialData || {};
+    const stats = result.defaultKeyStatistics || {};
+    const detail = result.summaryDetail || {};
+
+    const raw = (v: any) => v?.raw ?? v ?? null;
 
     return {
-      trailingPE: detail.trailingPE ?? quote.trailingPE ?? null,
-      forwardPE: detail.forwardPE ?? quote.forwardPE ?? null,
-      pegRatio: stats.pegRatio ?? null,
-      priceToBook: detail.priceToBook ?? quote.priceToBook ?? null,
-      priceToSales: stats.priceToSalesTrailing12Months ?? null,
-      evToEbitda: stats.enterpriseToEbitda ?? null,
-      evToRevenue: stats.enterpriseToRevenue ?? null,
-      profitMargin: fin.profitMargins ?? null,
-      operatingMargin: fin.operatingMargins ?? null,
-      returnOnEquity: fin.returnOnEquity ?? null,
-      returnOnAssets: fin.returnOnAssets ?? null,
-      currentRatio: fin.currentRatio ?? null,
-      quickRatio: fin.quickRatio ?? null,
-      debtToEquity: fin.debtToEquity ?? null,
-      interestCoverage: stats.interestCoverage ?? null,
-      dividendYield: detail.dividendYield ?? quote.dividendYield ?? null,
-      payoutRatio: detail.payoutRatio ?? null,
-      revenueGrowth: fin.revenueGrowth ?? null,
-      earningsGrowth: fin.earningsGrowth ?? null,
-      freeCashFlow: fin.freeCashflow ?? null,
-      totalCash: fin.totalCash ?? null,
-      totalDebt: fin.totalDebt ?? null,
+      trailingPE: raw(detail.trailingPE),
+      forwardPE: raw(detail.forwardPE),
+      pegRatio: raw(stats.pegRatio),
+      priceToBook: raw(detail.priceToBook),
+      priceToSales: raw(stats.priceToSalesTrailing12Months),
+      evToEbitda: raw(stats.enterpriseToEbitda),
+      evToRevenue: raw(stats.enterpriseToRevenue),
+      profitMargin: raw(fin.profitMargins),
+      operatingMargin: raw(fin.operatingMargins),
+      returnOnEquity: raw(fin.returnOnEquity),
+      returnOnAssets: raw(fin.returnOnAssets),
+      currentRatio: raw(fin.currentRatio),
+      quickRatio: raw(fin.quickRatio),
+      debtToEquity: raw(fin.debtToEquity),
+      interestCoverage: raw(stats.interestCoverage),
+      dividendYield: raw(detail.dividendYield),
+      payoutRatio: raw(detail.payoutRatio),
+      revenueGrowth: raw(fin.revenueGrowth),
+      earningsGrowth: raw(fin.earningsGrowth),
+      freeCashFlow: raw(fin.freeCashflow),
+      totalCash: raw(fin.totalCash),
+      totalDebt: raw(fin.totalDebt),
     };
   } catch {
     return null;
   }
 }
 
-export async function getBalanceSheet(
-  symbol: string
-): Promise<BalanceSheet | null> {
+export async function getBalanceSheet(symbol: string): Promise<BalanceSheet | null> {
   try {
-    const result = (await yahooFinance.quoteSummary(symbol, {
-      modules: ["balanceSheetHistory", "balanceSheetHistoryQuarterly"],
-    })) as any;
+    const data = await yfetch<any>(
+      `/v10/finance/quoteSummary/${symbol}?modules=balanceSheetHistory,balanceSheetHistoryQuarterly`
+    );
+    const result = data.quoteSummary?.result?.[0];
+    if (!result) return null;
 
     const mapItem = (item: any): BalanceSheetItem => ({
-      date: item.endDate
-        ? new Date(item.endDate).toISOString().split("T")[0]
-        : "",
-      totalAssets: item.totalAssets || 0,
-      totalLiabilities: item.totalLiab || 0,
-      totalEquity: item.totalStockholderEquity || 0,
-      totalCash: item.cash || 0,
-      totalDebt: item.longTermDebt || 0,
-      currentAssets: item.totalCurrentAssets || 0,
-      currentLiabilities: item.totalCurrentLiabilities || 0,
-      longTermDebt: item.longTermDebt || 0,
-      goodwill: item.goodWill || 0,
-      intangibleAssets: item.intangibleAssets || 0,
+      date: item.endDate?.fmt || "",
+      totalAssets: item.totalAssets?.raw || 0,
+      totalLiabilities: item.totalLiab?.raw || 0,
+      totalEquity: item.totalStockholderEquity?.raw || 0,
+      totalCash: item.cash?.raw || 0,
+      totalDebt: item.longTermDebt?.raw || 0,
+      currentAssets: item.totalCurrentAssets?.raw || 0,
+      currentLiabilities: item.totalCurrentLiabilities?.raw || 0,
+      longTermDebt: item.longTermDebt?.raw || 0,
+      goodwill: item.goodWill?.raw || 0,
+      intangibleAssets: item.intangibleAssets?.raw || 0,
     });
 
-    const annual =
-      result.balanceSheetHistory?.balanceSheetStatements?.map(
-        mapItem
-      ) || [];
-    const quarterly =
-      result.balanceSheetHistoryQuarterly?.balanceSheetStatements?.map(
-        mapItem
-      ) || [];
+    const annual = (result.balanceSheetHistory?.balanceSheetStatements || []).map(mapItem);
+    const quarterly = (result.balanceSheetHistoryQuarterly?.balanceSheetStatements || []).map(mapItem);
 
     return { annual, quarterly };
   } catch {
@@ -157,18 +173,31 @@ export async function getHistoricalPrices(
   period: string = "1y"
 ): Promise<HistoricalPrice[]> {
   try {
-    const result = (await yahooFinance.historical(symbol, {
-      period1: getPeriodStart(period),
-      interval: "1d",
-    })) as any[];
+    const rangeMap: Record<string, string> = {
+      "1m": "1mo",
+      "3m": "3mo",
+      "6m": "6mo",
+      "1y": "1y",
+      "5y": "5y",
+    };
+    const range = rangeMap[period] || "1y";
 
-    return result.map((item: any) => ({
-      date: new Date(item.date).toISOString().split("T")[0],
-      open: item.open || 0,
-      high: item.high || 0,
-      low: item.low || 0,
-      close: item.close || 0,
-      volume: item.volume || 0,
+    const data = await yfetch<any>(
+      `/v8/finance/chart/${symbol}?interval=1d&range=${range}`
+    );
+    const result = data.chart?.result?.[0];
+    if (!result) return [];
+
+    const timestamps = result.timestamp || [];
+    const quote = result.indicators?.quote?.[0];
+
+    return timestamps.map((ts: number, i: number) => ({
+      date: new Date(ts * 1000).toISOString().split("T")[0],
+      open: quote?.open?.[i] || 0,
+      high: quote?.high?.[i] || 0,
+      low: quote?.low?.[i] || 0,
+      close: quote?.close?.[i] || 0,
+      volume: quote?.volume?.[i] || 0,
     }));
   } catch {
     return [];
@@ -177,8 +206,10 @@ export async function getHistoricalPrices(
 
 export async function getNews(symbol: string): Promise<NewsItem[]> {
   try {
-    const result = (await yahooFinance.search(symbol, { newsCount: 10 })) as any;
-    return (result.news || []).map((item: any) => ({
+    const data = await yfetch<any>(
+      `/v1/finance/search?q=${symbol}&newsCount=10`
+    );
+    return (data.news || []).map((item: any) => ({
       title: item.title || "",
       publisher: item.publisher || "",
       link: item.link || "",
@@ -195,52 +226,51 @@ export async function getNews(symbol: string): Promise<NewsItem[]> {
 
 export async function getPeers(symbol: string): Promise<PeerData[]> {
   try {
-    // Get industry for peer search
-    const profile = (await yahooFinance.quoteSummary(symbol, {
-      modules: ["assetProfile"],
-    })) as any;
-    const industry = profile.assetProfile?.industry || "";
-
+    const profile = await yfetch<any>(
+      `/v10/finance/quoteSummary/${symbol}?modules=assetProfile`
+    );
+    const industry = profile.quoteSummary?.result?.[0]?.assetProfile?.industry || "";
     if (!industry) return [];
 
-    // Search for companies in the same industry
-    const searchResults = (await yahooFinance.search(industry, {
-      newsCount: 0,
-    })) as any;
-    const peerSymbols = (searchResults.quotes || [])
-      .filter(
-        (q: any) =>
-          q.symbol &&
-          q.symbol !== symbol &&
-          q.quoteType === "EQUITY"
-      )
+    const search = await yfetch<any>(
+      `/v1/finance/search?q=${encodeURIComponent(industry)}&quotesCount=10&newsCount=0`
+    );
+    const peerSymbols = (search.quotes || [])
+      .filter((q: any) => q.symbol && q.symbol !== symbol && q.quoteType === "EQUITY")
       .map((q: any) => q.symbol)
       .slice(0, 5);
 
     if (peerSymbols.length === 0) return [];
 
-    const peerQuotes = await Promise.all(
+    const peerData = await Promise.all(
       peerSymbols.map(async (sym: string) => {
         try {
-          const q = (await yahooFinance.quote(sym)) as any;
-          const s = (await yahooFinance.quoteSummary(sym, {
-            modules: ["financialData", "summaryDetail"],
-          })) as any;
-          const fin = s.financialData || {};
-          const detail = s.summaryDetail || {};
+          const [chartData, summaryData] = await Promise.all([
+            yfetch<any>(`/v8/finance/chart/${sym}?interval=1d&range=1d`),
+            yfetch<any>(`/v10/finance/quoteSummary/${sym}?modules=financialData,summaryDetail`),
+          ]);
+
+          const meta = chartData.chart?.result?.[0]?.meta;
+          const result = summaryData.quoteSummary?.result?.[0];
+          if (!meta || !result) return null;
+
+          const fin = result.financialData || {};
+          const detail = result.summaryDetail || {};
+          const raw = (v: any) => v?.raw ?? v ?? null;
+
           return {
-            symbol: q.symbol,
-            shortName: q.shortName || "",
-            regularMarketPrice: q.regularMarketPrice || 0,
-            marketCap: q.marketCap || 0,
-            trailingPE: detail.trailingPE ?? null,
-            forwardPE: detail.forwardPE ?? null,
-            priceToBook: detail.priceToBook ?? null,
-            returnOnEquity: fin.returnOnEquity ?? null,
-            profitMargin: fin.profitMargins ?? null,
-            debtToEquity: fin.debtToEquity ?? null,
-            revenueGrowth: fin.revenueGrowth ?? null,
-            dividendYield: detail.dividendYield ?? null,
+            symbol: meta.symbol,
+            shortName: meta.shortName || meta.symbol,
+            regularMarketPrice: meta.regularMarketPrice || 0,
+            marketCap: detail.marketCap?.raw || meta.marketCap || 0,
+            trailingPE: raw(detail.trailingPE),
+            forwardPE: raw(detail.forwardPE),
+            priceToBook: raw(detail.priceToBook),
+            returnOnEquity: raw(fin.returnOnEquity),
+            profitMargin: raw(fin.profitMargins),
+            debtToEquity: raw(fin.debtToEquity),
+            revenueGrowth: raw(fin.revenueGrowth),
+            dividendYield: raw(detail.dividendYield),
           };
         } catch {
           return null;
@@ -248,44 +278,24 @@ export async function getPeers(symbol: string): Promise<PeerData[]> {
       })
     );
 
-    return peerQuotes.filter(Boolean) as PeerData[];
+    return peerData.filter(Boolean) as PeerData[];
   } catch {
     return [];
   }
 }
 
-export async function getFCFHistory(
-  symbol: string
-): Promise<number[]> {
+export async function getFCFHistory(symbol: string): Promise<number[]> {
   try {
-    const result = (await yahooFinance.quoteSummary(symbol, {
-      modules: ["cashflowStatementHistory"],
-    })) as any;
+    const data = await yfetch<any>(
+      `/v10/finance/quoteSummary/${symbol}?modules=cashflowStatementHistory`
+    );
     const statements =
-      result.cashflowStatementHistory?.cashflowStatements || [];
+      data.quoteSummary?.result?.[0]?.cashflowStatementHistory?.cashflowStatements || [];
     return statements
-      .map((s: any) => s.totalCashFromOperatingActivities - (s.capitalExpenditures || 0))
+      .map((s: any) => (s.totalCashFromOperatingActivities?.raw || 0) - (s.capitalExpenditures?.raw || 0))
       .filter((v: any) => typeof v === "number")
       .reverse();
   } catch {
     return [];
-  }
-}
-
-function getPeriodStart(period: string): Date {
-  const now = new Date();
-  switch (period) {
-    case "1m":
-      return new Date(now.getFullYear(), now.getMonth() - 1, now.getDate());
-    case "3m":
-      return new Date(now.getFullYear(), now.getMonth() - 3, now.getDate());
-    case "6m":
-      return new Date(now.getFullYear(), now.getMonth() - 6, now.getDate());
-    case "1y":
-      return new Date(now.getFullYear() - 1, now.getMonth(), now.getDate());
-    case "5y":
-      return new Date(now.getFullYear() - 5, now.getMonth(), now.getDate());
-    default:
-      return new Date(now.getFullYear() - 1, now.getMonth(), now.getDate());
   }
 }
