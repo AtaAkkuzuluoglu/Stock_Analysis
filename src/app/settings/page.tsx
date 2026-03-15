@@ -116,54 +116,6 @@ export default function SettingsPage() {
           </button>
         </div>
       </Card>
-
-      <Card title="About OpenRouter" className="mt-6">
-        <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">
-          OpenRouter provides access to various AI models. The Hunter model is
-          used for stock analysis explanations.
-        </p>
-        <a
-          href="https://openrouter.ai"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-sm text-blue-600 dark:text-blue-400 hover:underline"
-        >
-          Get your API key at openrouter.ai →
-        </a>
-      </Card>
-
-      <Card title="Model Information" className="mt-6">
-        <div className="space-y-3 text-sm">
-          <div className="flex justify-between">
-            <span className="text-gray-500 dark:text-gray-400">Model</span>
-            <span className="text-gray-900 dark:text-gray-100 font-medium">
-              openrouter/hunter
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-gray-500 dark:text-gray-400">
-              Max Tokens
-            </span>
-            <span className="text-gray-900 dark:text-gray-100 font-medium">
-              2000
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-gray-500 dark:text-gray-400">
-              Temperature
-            </span>
-            <span className="text-gray-900 dark:text-gray-100 font-medium">
-              0.7
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-gray-500 dark:text-gray-400">Streaming</span>
-            <span className="text-gray-900 dark:text-gray-100 font-medium">
-              Enabled
-            </span>
-          </div>
-        </div>
-      </Card>
     </div>
   );
 }
