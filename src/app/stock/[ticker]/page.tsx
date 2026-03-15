@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import { notFound } from "next/navigation";
 import {
   getQuote,
   getKeyRatios,
@@ -40,27 +41,19 @@ export async function generateMetadata({ params }: PageProps) {
 export default async function StockPage({ params }: PageProps) {
   const ticker = params.ticker.toUpperCase();
 
-  let quote, ratios, balanceSheet, news, peers, historicalPrices, fcfHistory;
-
-  try {
-    [quote, ratios, balanceSheet, news, peers, historicalPrices, fcfHistory] =
-      await Promise.all([
-        getQuote(ticker),
-        getKeyRatios(ticker),
-        getBalanceSheet(ticker),
-        getNews(ticker),
-        getPeers(ticker),
-        getHistoricalPrices(ticker, "1y"),
-        getFCFHistory(ticker),
-      ]);
-  } catch (err: any) {
-    throw new Error(`Failed to fetch data for ${ticker}: ${err?.message || err}`);
-  }
+  const [quote, ratios, balanceSheet, news, peers, historicalPrices, fcfHistory] =
+    await Promise.all([
+      getQuote(ticker),
+      getKeyRatios(ticker),
+      getBalanceSheet(ticker),
+      getNews(ticker),
+      getPeers(ticker),
+      getHistoricalPrices(ticker, "1y"),
+      getFCFHistory(ticker),
+    ]);
 
   if (!quote) {
-    throw new Error(
-      `No quote data returned for "${ticker}". The data provider may be unavailable.`
-    );
+    notFound();
   }
 
   // Calculate DCF valuation

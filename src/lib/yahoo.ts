@@ -2,18 +2,20 @@ import type {
   StockQuote,
   KeyRatios,
   BalanceSheet,
-  BalanceSheetItem,
   HistoricalPrice,
   NewsItem,
   PeerData,
   SearchResult,
 } from "./types";
 
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
 const BASE = "https://query1.finance.yahoo.com";
-const HEADERS = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" };
 
 async function yfetch<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { headers: HEADERS });
+  const res = await fetch(`${BASE}${path}`, {
+    headers: { "User-Agent": UA },
+    next: { revalidate: 60 },
+  });
   if (!res.ok) throw new Error(`Yahoo Finance API error: ${res.status}`);
   return res.json();
 }
@@ -43,129 +45,74 @@ export async function searchTickers(query: string): Promise<SearchResult[]> {
 
 export async function getQuote(symbol: string): Promise<StockQuote | null> {
   try {
-    const data = await yfetch<any>(`/v8/finance/chart/${symbol}?interval=1d&range=1d`);
-    const result = data.chart?.result?.[0];
-    if (!result) return null;
+    const [chartData, searchData] = await Promise.all([
+      yfetch<any>(`/v8/finance/chart/${symbol}?interval=1d&range=1y`),
+      yfetch<any>(`/v1/finance/search?q=${symbol}&quotesCount=1&newsCount=0`).catch(() => null),
+    ]);
 
-    const meta = result.meta;
-    if (!meta || !meta.symbol) return null;
+    const meta = chartData.chart?.result?.[0]?.meta;
+    if (!meta?.symbol) return null;
 
-    // Get additional data from quoteSummary
-    const summary = await yfetch<any>(
-      `/v10/finance/quoteSummary/${symbol}?modules=price,defaultKeyStatistics,summaryDetail,assetProfile`
-    ).catch(() => null);
+    const searchQuote = searchData?.quotes?.[0] || {};
+    const industry = searchQuote.industry || "";
+    const sector = searchQuote.sectorDisp || searchQuote.sector || "";
 
-    const price = summary?.quoteSummary?.result?.[0]?.price || {};
-    const detail = summary?.quoteSummary?.result?.[0]?.summaryDetail || {};
-    const stats = summary?.quoteSummary?.result?.[0]?.defaultKeyStatistics || {};
-    const profile = summary?.quoteSummary?.result?.[0]?.assetProfile || {};
+    // Calculate moving averages from historical data
+    const quotes = chartData.chart?.result?.[0]?.indicators?.quote?.[0];
+    const closes = (quotes?.close || []).filter((c: any) => c != null);
+    let fiftyDayAvg = 0;
+    let twoHundredDayAvg = 0;
+    if (closes.length >= 50) {
+      const last50 = closes.slice(-50);
+      fiftyDayAvg = last50.reduce((a: number, b: number) => a + b, 0) / last50.length;
+    }
+    if (closes.length >= 200) {
+      const last200 = closes.slice(-200);
+      twoHundredDayAvg = last200.reduce((a: number, b: number) => a + b, 0) / last200.length;
+    }
+
+    const prevClose = meta.chartPreviousClose || 0;
+    const change = prevClose ? meta.regularMarketPrice - prevClose : 0;
+    const changePercent = prevClose ? (change / prevClose) * 100 : 0;
 
     return {
       symbol: meta.symbol,
-      shortName: price.shortName || meta.shortName || meta.symbol,
-      longName: price.longName || meta.longName || meta.shortName || meta.symbol,
+      shortName: meta.shortName || meta.symbol,
+      longName: meta.longName || meta.shortName || meta.symbol,
       currency: meta.currency || "USD",
       regularMarketPrice: meta.regularMarketPrice || 0,
-      regularMarketChange: meta.regularMarketPrice - (meta.previousClose || meta.chartPreviousClose || 0),
-      regularMarketChangePercent: meta.previousClose
-        ? ((meta.regularMarketPrice - meta.previousClose) / meta.previousClose) * 100
-        : 0,
-      regularMarketPreviousClose: meta.previousClose || meta.chartPreviousClose || 0,
-      regularMarketOpen: detail.regularMarketOpen || meta.regularMarketPrice || 0,
-      regularMarketDayHigh: detail.regularMarketDayHigh || 0,
-      regularMarketDayLow: detail.regularMarketDayLow || 0,
-      regularMarketVolume: detail.regularMarketVolume || 0,
-      marketCap: detail.marketCap?.raw || meta.marketCap || 0,
-      fiftyTwoWeekLow: detail.fiftyTwoWeekLow || 0,
-      fiftyTwoWeekHigh: detail.fiftyTwoWeekHigh || 0,
-      fiftyDayAverage: detail.fiftyDayAverage || 0,
-      twoHundredDayAverage: detail.twoHundredDayAverage || 0,
-      sharesOutstanding: stats.sharesOutstanding?.raw || meta.sharesOutstanding || 0,
-      trailingPE: detail.trailingPE?.raw ?? detail.trailingPE ?? null,
-      forwardPE: detail.forwardPE?.raw ?? detail.forwardPE ?? null,
-      priceToBook: detail.priceToBook?.raw ?? detail.priceToBook ?? null,
-      dividendYield: detail.dividendYield?.raw ?? detail.dividendYield ?? null,
-      beta: stats.beta?.raw ?? stats.beta ?? null,
-      sector: profile.sector || "",
-      industry: profile.industry || "",
+      regularMarketChange: change,
+      regularMarketChangePercent: changePercent,
+      regularMarketPreviousClose: prevClose,
+      regularMarketOpen: meta.regularMarketPrice || 0,
+      regularMarketDayHigh: meta.regularMarketDayHigh || 0,
+      regularMarketDayLow: meta.regularMarketDayLow || 0,
+      regularMarketVolume: meta.regularMarketVolume || 0,
+      marketCap: 0,
+      fiftyTwoWeekLow: meta.fiftyTwoWeekLow || 0,
+      fiftyTwoWeekHigh: meta.fiftyTwoWeekHigh || 0,
+      fiftyDayAverage: fiftyDayAvg,
+      twoHundredDayAverage: twoHundredDayAvg,
+      sharesOutstanding: 0,
+      trailingPE: null,
+      forwardPE: null,
+      priceToBook: null,
+      dividendYield: null,
+      beta: null,
+      sector,
+      industry,
     };
   } catch {
     return null;
   }
 }
 
-export async function getKeyRatios(symbol: string): Promise<KeyRatios | null> {
-  try {
-    const data = await yfetch<any>(
-      `/v10/finance/quoteSummary/${symbol}?modules=financialData,defaultKeyStatistics,summaryDetail`
-    );
-    const result = data.quoteSummary?.result?.[0];
-    if (!result) return null;
-
-    const fin = result.financialData || {};
-    const stats = result.defaultKeyStatistics || {};
-    const detail = result.summaryDetail || {};
-
-    const raw = (v: any) => v?.raw ?? v ?? null;
-
-    return {
-      trailingPE: raw(detail.trailingPE),
-      forwardPE: raw(detail.forwardPE),
-      pegRatio: raw(stats.pegRatio),
-      priceToBook: raw(detail.priceToBook),
-      priceToSales: raw(stats.priceToSalesTrailing12Months),
-      evToEbitda: raw(stats.enterpriseToEbitda),
-      evToRevenue: raw(stats.enterpriseToRevenue),
-      profitMargin: raw(fin.profitMargins),
-      operatingMargin: raw(fin.operatingMargins),
-      returnOnEquity: raw(fin.returnOnEquity),
-      returnOnAssets: raw(fin.returnOnAssets),
-      currentRatio: raw(fin.currentRatio),
-      quickRatio: raw(fin.quickRatio),
-      debtToEquity: raw(fin.debtToEquity),
-      interestCoverage: raw(stats.interestCoverage),
-      dividendYield: raw(detail.dividendYield),
-      payoutRatio: raw(detail.payoutRatio),
-      revenueGrowth: raw(fin.revenueGrowth),
-      earningsGrowth: raw(fin.earningsGrowth),
-      freeCashFlow: raw(fin.freeCashflow),
-      totalCash: raw(fin.totalCash),
-      totalDebt: raw(fin.totalDebt),
-    };
-  } catch {
-    return null;
-  }
+export async function getKeyRatios(_symbol: string): Promise<KeyRatios | null> {
+  return null;
 }
 
-export async function getBalanceSheet(symbol: string): Promise<BalanceSheet | null> {
-  try {
-    const data = await yfetch<any>(
-      `/v10/finance/quoteSummary/${symbol}?modules=balanceSheetHistory,balanceSheetHistoryQuarterly`
-    );
-    const result = data.quoteSummary?.result?.[0];
-    if (!result) return null;
-
-    const mapItem = (item: any): BalanceSheetItem => ({
-      date: item.endDate?.fmt || "",
-      totalAssets: item.totalAssets?.raw || 0,
-      totalLiabilities: item.totalLiab?.raw || 0,
-      totalEquity: item.totalStockholderEquity?.raw || 0,
-      totalCash: item.cash?.raw || 0,
-      totalDebt: item.longTermDebt?.raw || 0,
-      currentAssets: item.totalCurrentAssets?.raw || 0,
-      currentLiabilities: item.totalCurrentLiabilities?.raw || 0,
-      longTermDebt: item.longTermDebt?.raw || 0,
-      goodwill: item.goodWill?.raw || 0,
-      intangibleAssets: item.intangibleAssets?.raw || 0,
-    });
-
-    const annual = (result.balanceSheetHistory?.balanceSheetStatements || []).map(mapItem);
-    const quarterly = (result.balanceSheetHistoryQuarterly?.balanceSheetStatements || []).map(mapItem);
-
-    return { annual, quarterly };
-  } catch {
-    return null;
-  }
+export async function getBalanceSheet(_symbol: string): Promise<BalanceSheet | null> {
+  return null;
 }
 
 export async function getHistoricalPrices(
@@ -174,23 +121,16 @@ export async function getHistoricalPrices(
 ): Promise<HistoricalPrice[]> {
   try {
     const rangeMap: Record<string, string> = {
-      "1m": "1mo",
-      "3m": "3mo",
-      "6m": "6mo",
-      "1y": "1y",
-      "5y": "5y",
+      "1m": "1mo", "3m": "3mo", "6m": "6mo", "1y": "1y", "5y": "5y",
     };
-    const range = rangeMap[period] || "1y";
-
     const data = await yfetch<any>(
-      `/v8/finance/chart/${symbol}?interval=1d&range=${range}`
+      `/v8/finance/chart/${symbol}?interval=1d&range=${rangeMap[period] || "1y"}`
     );
     const result = data.chart?.result?.[0];
     if (!result) return [];
 
     const timestamps = result.timestamp || [];
     const quote = result.indicators?.quote?.[0];
-
     return timestamps.map((ts: number, i: number) => ({
       date: new Date(ts * 1000).toISOString().split("T")[0],
       open: quote?.open?.[i] || 0,
@@ -226,16 +166,16 @@ export async function getNews(symbol: string): Promise<NewsItem[]> {
 
 export async function getPeers(symbol: string): Promise<PeerData[]> {
   try {
-    const profile = await yfetch<any>(
-      `/v10/finance/quoteSummary/${symbol}?modules=assetProfile`
+    const searchData = await yfetch<any>(
+      `/v1/finance/search?q=${symbol}&quotesCount=1&newsCount=0`
     );
-    const industry = profile.quoteSummary?.result?.[0]?.assetProfile?.industry || "";
+    const industry = searchData?.quotes?.[0]?.industry || "";
     if (!industry) return [];
 
-    const search = await yfetch<any>(
+    const peerSearch = await yfetch<any>(
       `/v1/finance/search?q=${encodeURIComponent(industry)}&quotesCount=10&newsCount=0`
     );
-    const peerSymbols = (search.quotes || [])
+    const peerSymbols = (peerSearch.quotes || [])
       .filter((q: any) => q.symbol && q.symbol !== symbol && q.quoteType === "EQUITY")
       .map((q: any) => q.symbol)
       .slice(0, 5);
@@ -245,32 +185,22 @@ export async function getPeers(symbol: string): Promise<PeerData[]> {
     const peerData = await Promise.all(
       peerSymbols.map(async (sym: string) => {
         try {
-          const [chartData, summaryData] = await Promise.all([
-            yfetch<any>(`/v8/finance/chart/${sym}?interval=1d&range=1d`),
-            yfetch<any>(`/v10/finance/quoteSummary/${sym}?modules=financialData,summaryDetail`),
-          ]);
-
+          const chartData = await yfetch<any>(`/v8/finance/chart/${sym}?interval=1d&range=1d`);
           const meta = chartData.chart?.result?.[0]?.meta;
-          const result = summaryData.quoteSummary?.result?.[0];
-          if (!meta || !result) return null;
-
-          const fin = result.financialData || {};
-          const detail = result.summaryDetail || {};
-          const raw = (v: any) => v?.raw ?? v ?? null;
-
+          if (!meta) return null;
           return {
             symbol: meta.symbol,
             shortName: meta.shortName || meta.symbol,
             regularMarketPrice: meta.regularMarketPrice || 0,
-            marketCap: detail.marketCap?.raw || meta.marketCap || 0,
-            trailingPE: raw(detail.trailingPE),
-            forwardPE: raw(detail.forwardPE),
-            priceToBook: raw(detail.priceToBook),
-            returnOnEquity: raw(fin.returnOnEquity),
-            profitMargin: raw(fin.profitMargins),
-            debtToEquity: raw(fin.debtToEquity),
-            revenueGrowth: raw(fin.revenueGrowth),
-            dividendYield: raw(detail.dividendYield),
+            marketCap: 0,
+            trailingPE: null,
+            forwardPE: null,
+            priceToBook: null,
+            returnOnEquity: null,
+            profitMargin: null,
+            debtToEquity: null,
+            revenueGrowth: null,
+            dividendYield: null,
           };
         } catch {
           return null;
@@ -284,18 +214,6 @@ export async function getPeers(symbol: string): Promise<PeerData[]> {
   }
 }
 
-export async function getFCFHistory(symbol: string): Promise<number[]> {
-  try {
-    const data = await yfetch<any>(
-      `/v10/finance/quoteSummary/${symbol}?modules=cashflowStatementHistory`
-    );
-    const statements =
-      data.quoteSummary?.result?.[0]?.cashflowStatementHistory?.cashflowStatements || [];
-    return statements
-      .map((s: any) => (s.totalCashFromOperatingActivities?.raw || 0) - (s.capitalExpenditures?.raw || 0))
-      .filter((v: any) => typeof v === "number")
-      .reverse();
-  } catch {
-    return [];
-  }
+export async function getFCFHistory(_symbol: string): Promise<number[]> {
+  return [];
 }
